@@ -1,0 +1,28 @@
+experiment_name: "NIH_MultiClass_AuxiliaryMultiLabel"
+
+data:
+  manifest: "data/nih_multiclass_manifest.csv"
+  image_root: "data/archive"
+  image_size: 224
+  num_classes: 15
+  multilabel_classes: 14
+
+model:
+  backbone: "resnet50"
+  pretrained: true
+  auxiliary_loss_weight: 0.5
+
+train:
+  seed: 42
+  batch_size: 64
+  learning_rate: 0.0001
+  epochs: 30
+  amp: true
+  class_weight_clip: [0.25, 4.0]
+  auxiliary_loss: "asymmetric_bce"
+  save_dir: "checkpoints/multiclass"
+
+evaluation:
+  split: "test"
+  primary_metric: "macro_f1"
+  multilabel_threshold_source: "validation"

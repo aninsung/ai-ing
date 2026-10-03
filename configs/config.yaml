@@ -1,0 +1,24 @@
+experiment_name: "BicDRL_ResNet50_Default"
+
+data:
+  train_csv_path: "data/train_data.csv"
+  test_csv_path: "data/test_data.csv"
+  image_dir: "data/raw/"
+  image_size: 224
+
+agent:
+  backbone: "resnet50"  # 사용할 CNN 뼈대 모델
+  num_classes: 2        # 분류할 클래스 수 (현재 0:정상, 1:결절 이진분류)
+  gamma_factor: 1.0     # 환경 보상 가중치를 부스팅할 계수 (페널티 폭탄/증폭 시 수정)
+  epsilon_start: 1.0    # 학습 초기의 무작위 탐험 확률 (1.0 = 무조건 100% 랜덤 찍기)
+  epsilon_end: 0.05     # 학습 후반의 최소 무작위 탐험 확률 (0.05 = 5% 랜덤, 95% 퓨어 실력)
+  epsilon_decay: 0.995  # 스텝마다 탐험 확률(랜덤)이 깎이는 속도 (0.995는 매우 빠르게 감소함)
+  target_update_freq: 1000 # TargetNet이 MainNet의 지식을 복사해가는 주기 (스텝 수)
+  buffer_capacity: 50000 # 오답노트의 최대 보관 장수 (꽉 차면 가장 오래된 경험부터 삭제됨)
+  batch_size: 32        # 매 스텝마다 오답노트에서 무작위로 뽑아올 복습용 문제 데이터 수량
+
+train:
+  learning_rate: 0.0001 # 최적화 속도 (보폭이 너무 빠르면 섬세한 암기가 안됨, 0.0001 권장)
+  num_episodes: 100      # 아래 스텝 세트를 총 몇 바퀴(세트) 훈련할 것인가 (테스트용 10, 실전용 100)
+  steps_per_episode: 500 # 1세트(에피소드)당 사진을 몇 장 볼 것인가 (500번 보고 성적표 정산)
+  save_dir: "checkpoints/"
