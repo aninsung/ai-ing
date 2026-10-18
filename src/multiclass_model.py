@@ -13,7 +13,11 @@ class MultiTaskResNet50(nn.Module):
         self.encoder = nn.Sequential(*list(backbone.children())[:-1])
         self.primary_head = nn.Linear(features, num_classes)
         self.auxiliary_head = nn.Linear(features, auxiliary_classes)
+        self.register_buffer("imagenet_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer("imagenet_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
 
     def forward(self, images):
-        features = self.encoder(images.repeat(1, 3, 1, 1)).flatten(1)
+        x = images.repeat(1, 3, 1, 1)
+        x = (x - self.imagenet_mean) / self.imagenet_std
+        features = self.encoder(x).flatten(1)
         return self.primary_head(features), self.auxiliary_head(features)

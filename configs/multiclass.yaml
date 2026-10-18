@@ -10,19 +10,20 @@ data:
 model:
   backbone: "resnet50"
   pretrained: true
-  auxiliary_loss_weight: 0.5
+  auxiliary_loss_weight: 1.0
 
 train:
   seed: 42
   batch_size: 64
   learning_rate: 0.0001
+  head_learning_rate: 0.001
   epochs: 30
   amp: true
   class_weight_clip: [0.25, 4.0]
-  auxiliary_loss: "asymmetric_bce"
+  auxiliary_loss: "bce_pos_weight"
   save_dir: "checkpoints/multiclass"
 
 evaluation:
   split: "test"
-  primary_metric: "macro_f1"
+  primary_metric: "macro_auroc"
   multilabel_threshold_source: "validation"

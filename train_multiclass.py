@@ -7,9 +7,10 @@ import numpy as np
 import torch
 import yaml
 from torch.utils.data import DataLoader
-from src.multiclass_dataset import read_manifest, NIHMultiTaskDataset, CLASSES
+from src.multiclass_dataset import read_manifest, NIHMultiTaskDataset, CLASSES, DISEASES
 from src.multiclass_model import MultiTaskResNet50
-from src.multiclass_losses import multitask_loss
+from src.multiclass_losses import auxiliary_positive_weight, multitask_loss
+from src.multiclass_metrics import macro_binary_auroc
 
 
 def seed_all(seed):
@@ -19,12 +20,15 @@ def seed_all(seed):
 
 @torch.no_grad()
 def validate(model, loader, device):
-    model.eval(); correct = total = 0; predictions = []; targets = []
+    model.eval(); correct = total = 0; predictions = []; targets = []; disease_probs = []; disease_targets = []
     for batch in loader:
-        primary = batch["primary"].to(device); logits, _ = model(batch["image"].to(device))
+        primary = batch["primary"].to(device)
+        primary_logits, auxiliary_logits = model(batch["image"].to(device))
+        disease_probs.append(auxiliary_logits.sigmoid().cpu().numpy())
+        disease_targets.append(batch["auxiliary"].numpy())
         mask = primary >= 0
         if mask.any():
-            pred = logits[mask].argmax(1); correct += (pred == primary[mask]).sum().item(); total += mask.sum().item()
+            pred = primary_logits[mask].argmax(1); correct += (pred == primary[mask]).sum().item(); total += mask.sum().item()
             predictions.extend(pred.cpu().tolist()); targets.extend(primary[mask].cpu().tolist())
     balanced = None
     if targets:
@@ -34,7 +38,14 @@ def validate(model, loader, device):
             if actual:
                 recalls.append(sum(predictions[i] == cls for i in actual) / len(actual))
         balanced = float(np.mean(recalls)) if recalls else None
-    return {"accuracy": correct / total if total else None, "balanced_accuracy": balanced, "primary_images": total}
+    macro, per_label = macro_binary_auroc(np.concatenate(disease_targets), np.concatenate(disease_probs))
+    return {
+        "accuracy": correct / total if total else None,
+        "balanced_accuracy": balanced,
+        "primary_images": total,
+        "macro_auroc": macro,
+        "label_auroc": {name: score for name, score in zip(DISEASES, per_label)},
+    }
 
 
 def main():
@@ -48,8 +59,8 @@ def main():
     rows = {split: read_manifest(config["data"]["manifest"], split) for split in ("train", "val", "test")}
     root = config["data"]["image_root"]
     image_size = int(config["data"].get("image_size", 224))
-    datasets = {"train": NIHMultiTaskDataset(rows["train"], root, augment=True, image_size=image_size),
-                "val": NIHMultiTaskDataset(rows["val"], root, image_size=image_size)}
+    datasets = {split: NIHMultiTaskDataset(rows[split], root, augment=split == "train", image_size=image_size)
+                for split in ("train", "val", "test")}
     loaders = {split: DataLoader(dataset, batch_size=config["train"]["batch_size"],
                                  shuffle=split == "train", num_workers=0,
                                  pin_memory=torch.cuda.is_available())
@@ -62,7 +73,13 @@ def main():
     if (counts == 0).any(): raise ValueError(f"No train primary examples for classes: {[CLASSES[i] for i,v in enumerate(counts) if v == 0]}")
     weights = (1.0 / counts.clamp_min(1).log1p()); weights = weights / weights.mean()
     lo, hi = config["train"]["class_weight_clip"]; weights = weights.clamp(lo, hi)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config["train"]["learning_rate"])
+    pos_weight = auxiliary_positive_weight(rows["train"], DISEASES).to(device)
+    auxiliary_loss_name = config["train"].get("auxiliary_loss", "asymmetric_bce")
+    head_lr = float(config["train"].get("head_learning_rate", config["train"]["learning_rate"]))
+    optimizer = torch.optim.AdamW([
+        {"params": model.encoder.parameters(), "lr": config["train"]["learning_rate"]},
+        {"params": list(model.primary_head.parameters()) + list(model.auxiliary_head.parameters()), "lr": head_lr},
+    ])
     use_amp = bool(config["train"].get("amp", True)) and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     save_dir = Path(config["train"]["save_dir"]); save_dir.mkdir(parents=True, exist_ok=True)
@@ -86,7 +103,9 @@ def main():
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
                 p_logits, a_logits = model(images)
-                loss, primary_loss, auxiliary_loss = multitask_loss(p_logits, a_logits, primary, auxiliary, weights, config["model"]["auxiliary_loss_weight"])
+                loss, primary_loss, auxiliary_loss = multitask_loss(
+                    p_logits, a_logits, primary, auxiliary, weights, config["model"]["auxiliary_loss_weight"],
+                    auxiliary_loss_name, pos_weight)
             if not torch.isfinite(loss):
                 optimizer.zero_grad(set_to_none=True)
                 continue
@@ -97,11 +116,21 @@ def main():
                 print(json.dumps({"epoch": epoch + 1, "step": step, "steps": total_steps, "loss": loss_sum / samples}), flush=True)
         metrics = validate(model, loaders["val"], device); metrics.update(epoch=epoch+1, loss=loss_sum/samples, primary_loss=primary_sum/samples, auxiliary_loss=auxiliary_sum/samples)
         print(json.dumps(metrics))
-        checkpoint = {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": epoch, "best_score": best, "config": config, "classes": CLASSES, "class_weights": weights.cpu()}
+        score = metrics["macro_auroc"] if metrics["macro_auroc"] is not None else -1.0
+        improved = score > best
+        best = max(best, score)
+        checkpoint = {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": epoch, "best_score": best, "config": config, "classes": CLASSES, "class_weights": weights.cpu(), "selection_metric": "macro_auroc"}
         torch.save(checkpoint, save_dir / "latest_model.pth")
-        score = metrics["balanced_accuracy"] if metrics["balanced_accuracy"] is not None else -1
-        if score > best: best = score; torch.save(checkpoint, save_dir / "best_model.pth")
+        if improved:
+            torch.save(checkpoint, save_dir / "best_model.pth")
         (save_dir / "history.jsonl").open("a", encoding="utf-8").write(json.dumps(metrics) + "\n")
+    best_path = save_dir / "best_model.pth"
+    if best_path.exists():
+        model.load_state_dict(torch.load(best_path, map_location=device)["model"])
+        test_metrics = validate(model, loaders["test"], device)
+        test_metrics["split"] = "test"
+        print(json.dumps({"test_macro_auroc": test_metrics["macro_auroc"], "label_auroc": test_metrics["label_auroc"]}))
+        (save_dir / "test_metrics.json").write_text(json.dumps(test_metrics, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__": main()
