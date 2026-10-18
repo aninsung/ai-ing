@@ -19,30 +19,41 @@ def seed_all(seed):
 
 
 @torch.no_grad()
-def validate(model, loader, device):
-    model.eval(); correct = total = 0; predictions = []; targets = []; disease_probs = []; disease_targets = []
+def validate(model, loader, device, log_prior=None, tau=0.0, select_tau=False):
+    model.eval(); disease_probs = []; disease_targets = []; primary_logits = []; primary_labels = []
     for batch in loader:
         primary = batch["primary"].to(device)
-        primary_logits, auxiliary_logits = model(batch["image"].to(device))
+        logits, auxiliary_logits = model(batch["image"].to(device))
         disease_probs.append(auxiliary_logits.sigmoid().cpu().numpy())
         disease_targets.append(batch["auxiliary"].numpy())
         mask = primary >= 0
         if mask.any():
-            pred = primary_logits[mask].argmax(1); correct += (pred == primary[mask]).sum().item(); total += mask.sum().item()
-            predictions.extend(pred.cpu().tolist()); targets.extend(primary[mask].cpu().tolist())
-    balanced = None
-    if targets:
-        recalls = []
-        for cls in range(len(CLASSES)):
-            actual = [i for i, value in enumerate(targets) if value == cls]
-            if actual:
-                recalls.append(sum(predictions[i] == cls for i in actual) / len(actual))
-        balanced = float(np.mean(recalls)) if recalls else None
+            primary_logits.append(logits[mask].cpu())
+            primary_labels.append(primary[mask].cpu())
+    logits = torch.cat(primary_logits)
+    labels = torch.cat(primary_labels)
+    taus = (0.0, 0.5, 1.0) if select_tau else (tau,)
+    chosen_tau, predictions = tau, None
+    best_correct = -1
+    for candidate in taus:
+        adjusted = logits if log_prior is None else logits + candidate * log_prior.cpu()
+        pred = adjusted.argmax(1)
+        correct = int((pred == labels).sum())
+        if correct > best_correct:
+            best_correct, chosen_tau, predictions = correct, candidate, pred
+    predictions = predictions.tolist()
+    targets = labels.tolist()
+    recalls = []
+    for cls in range(len(CLASSES)):
+        actual = [i for i, value in enumerate(targets) if value == cls]
+        if actual:
+            recalls.append(sum(predictions[i] == cls for i in actual) / len(actual))
     macro, per_label = macro_binary_auroc(np.concatenate(disease_targets), np.concatenate(disease_probs))
     return {
-        "accuracy": correct / total if total else None,
-        "balanced_accuracy": balanced,
-        "primary_images": total,
+        "accuracy": best_correct / len(targets),
+        "balanced_accuracy": float(np.mean(recalls)) if recalls else None,
+        "primary_images": len(targets),
+        "prior_tau": chosen_tau,
         "macro_auroc": macro,
         "label_auroc": {name: score for name, score in zip(DISEASES, per_label)},
     }
@@ -73,6 +84,10 @@ def main():
     if (counts == 0).any(): raise ValueError(f"No train primary examples for classes: {[CLASSES[i] for i,v in enumerate(counts) if v == 0]}")
     weights = (1.0 / counts.clamp_min(1).log1p()); weights = weights / weights.mean()
     lo, hi = config["train"]["class_weight_clip"]; weights = weights.clamp(lo, hi)
+    log_prior = (counts / counts.sum()).clamp_min(1e-8).log()
+    if config["train"].get("prior_bias", False):
+        with torch.no_grad():
+            model.primary_head.bias.copy_(log_prior)
     pos_weight = auxiliary_positive_weight(rows["train"], DISEASES).to(device)
     auxiliary_loss_name = config["train"].get("auxiliary_loss", "asymmetric_bce")
     head_lr = float(config["train"].get("head_learning_rate", config["train"]["learning_rate"]))
@@ -121,7 +136,8 @@ def main():
             if step == 1 or step % 200 == 0:
                 print(json.dumps({"epoch": epoch + 1, "step": step, "steps": total_steps, "loss": loss_sum / samples,
                                   "train_accuracy": primary_correct / primary_seen if primary_seen else None}), flush=True)
-        metrics = validate(model, loaders["val"], device); metrics.update(epoch=epoch+1, loss=loss_sum/samples, primary_loss=primary_sum/samples, auxiliary_loss=auxiliary_sum/samples, train_accuracy=primary_correct / primary_seen if primary_seen else None)
+        metrics = validate(model, loaders["val"], device, log_prior, select_tau=bool(config["train"].get("prior_bias", False)))
+        metrics.update(epoch=epoch+1, loss=loss_sum/samples, primary_loss=primary_sum/samples, auxiliary_loss=auxiliary_sum/samples, train_accuracy=primary_correct / primary_seen if primary_seen else None)
         print(json.dumps(metrics))
         selection = config.get("evaluation", {}).get("primary_metric", "macro_auroc")
         if selection not in {"accuracy", "balanced_accuracy", "macro_auroc"}:
@@ -129,15 +145,16 @@ def main():
         score = metrics[selection] if metrics[selection] is not None else -1.0
         improved = score > best
         best = max(best, score)
-        checkpoint = {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": epoch, "best_score": best, "config": config, "classes": CLASSES, "class_weights": weights.cpu(), "selection_metric": selection}
+        checkpoint = {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": epoch, "best_score": best, "prior_tau": metrics.get("prior_tau", 0.0), "config": config, "classes": CLASSES, "class_weights": weights.cpu(), "selection_metric": selection}
         torch.save(checkpoint, save_dir / "latest_model.pth")
         if improved:
             torch.save(checkpoint, save_dir / "best_model.pth")
         (save_dir / "history.jsonl").open("a", encoding="utf-8").write(json.dumps(metrics) + "\n")
     best_path = save_dir / "best_model.pth"
     if best_path.exists():
-        model.load_state_dict(torch.load(best_path, map_location=device)["model"])
-        test_metrics = validate(model, loaders["test"], device)
+        chosen = torch.load(best_path, map_location=device)
+        model.load_state_dict(chosen["model"])
+        test_metrics = validate(model, loaders["test"], device, log_prior, tau=float(chosen.get("prior_tau", 0.0)))
         test_metrics["split"] = "test"
         print(json.dumps({"test_accuracy": test_metrics["accuracy"], "test_balanced_accuracy": test_metrics["balanced_accuracy"], "test_macro_auroc": test_metrics["macro_auroc"]}))
         (save_dir / "test_metrics.json").write_text(json.dumps(test_metrics, indent=2), encoding="utf-8")

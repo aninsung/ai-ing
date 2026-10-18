@@ -19,7 +19,8 @@ train:
   head_learning_rate: 0.001
   epochs: 5
   amp: false
-  class_weight_clip: [1.0, 1.0]
+  class_weight_clip: [0.5, 2.0]
+  prior_bias: true
   auxiliary_loss: "bce_pos_weight"
   save_dir: "checkpoints/multiclass_acc"
 
