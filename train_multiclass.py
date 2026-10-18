@@ -96,6 +96,7 @@ def main():
         raise ValueError("--epochs must be positive")
     for epoch in range(start_epoch, epochs):
         model.train(); loss_sum = primary_sum = auxiliary_sum = samples = 0
+        primary_correct = primary_seen = 0
         step = 0
         total_steps = len(loaders["train"])
         for batch in loaders["train"]:
@@ -111,15 +112,24 @@ def main():
                 continue
             scaler.scale(loss).backward(); scaler.step(optimizer); scaler.update()
             n = len(images); samples += n; loss_sum += loss.item()*n; primary_sum += primary_loss.item()*n; auxiliary_sum += auxiliary_loss.item()*n
+            with torch.no_grad():
+                labeled = primary >= 0
+                if labeled.any():
+                    primary_seen += int(labeled.sum())
+                    primary_correct += int((p_logits.detach()[labeled].argmax(1) == primary[labeled]).sum())
             step += 1
             if step == 1 or step % 200 == 0:
-                print(json.dumps({"epoch": epoch + 1, "step": step, "steps": total_steps, "loss": loss_sum / samples}), flush=True)
-        metrics = validate(model, loaders["val"], device); metrics.update(epoch=epoch+1, loss=loss_sum/samples, primary_loss=primary_sum/samples, auxiliary_loss=auxiliary_sum/samples)
+                print(json.dumps({"epoch": epoch + 1, "step": step, "steps": total_steps, "loss": loss_sum / samples,
+                                  "train_accuracy": primary_correct / primary_seen if primary_seen else None}), flush=True)
+        metrics = validate(model, loaders["val"], device); metrics.update(epoch=epoch+1, loss=loss_sum/samples, primary_loss=primary_sum/samples, auxiliary_loss=auxiliary_sum/samples, train_accuracy=primary_correct / primary_seen if primary_seen else None)
         print(json.dumps(metrics))
-        score = metrics["macro_auroc"] if metrics["macro_auroc"] is not None else -1.0
+        selection = config.get("evaluation", {}).get("primary_metric", "macro_auroc")
+        if selection not in {"accuracy", "balanced_accuracy", "macro_auroc"}:
+            raise ValueError(f"Unsupported selection metric: {selection}")
+        score = metrics[selection] if metrics[selection] is not None else -1.0
         improved = score > best
         best = max(best, score)
-        checkpoint = {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": epoch, "best_score": best, "config": config, "classes": CLASSES, "class_weights": weights.cpu(), "selection_metric": "macro_auroc"}
+        checkpoint = {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": epoch, "best_score": best, "config": config, "classes": CLASSES, "class_weights": weights.cpu(), "selection_metric": selection}
         torch.save(checkpoint, save_dir / "latest_model.pth")
         if improved:
             torch.save(checkpoint, save_dir / "best_model.pth")
@@ -129,7 +139,7 @@ def main():
         model.load_state_dict(torch.load(best_path, map_location=device)["model"])
         test_metrics = validate(model, loaders["test"], device)
         test_metrics["split"] = "test"
-        print(json.dumps({"test_macro_auroc": test_metrics["macro_auroc"], "label_auroc": test_metrics["label_auroc"]}))
+        print(json.dumps({"test_accuracy": test_metrics["accuracy"], "test_balanced_accuracy": test_metrics["balanced_accuracy"], "test_macro_auroc": test_metrics["macro_auroc"]}))
         (save_dir / "test_metrics.json").write_text(json.dumps(test_metrics, indent=2), encoding="utf-8")
 
 
