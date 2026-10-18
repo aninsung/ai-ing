@@ -47,8 +47,9 @@ def main():
     seed_all(config["train"]["seed"])
     rows = {split: read_manifest(config["data"]["manifest"], split) for split in ("train", "val", "test")}
     root = config["data"]["image_root"]
-    datasets = {"train": NIHMultiTaskDataset(rows["train"], root, augment=True),
-                "val": NIHMultiTaskDataset(rows["val"], root)}
+    image_size = int(config["data"].get("image_size", 224))
+    datasets = {"train": NIHMultiTaskDataset(rows["train"], root, augment=True, image_size=image_size),
+                "val": NIHMultiTaskDataset(rows["val"], root, image_size=image_size)}
     loaders = {split: DataLoader(dataset, batch_size=config["train"]["batch_size"],
                                  shuffle=split == "train", num_workers=0,
                                  pin_memory=torch.cuda.is_available())
@@ -78,6 +79,8 @@ def main():
         raise ValueError("--epochs must be positive")
     for epoch in range(start_epoch, epochs):
         model.train(); loss_sum = primary_sum = auxiliary_sum = samples = 0
+        step = 0
+        total_steps = len(loaders["train"])
         for batch in loaders["train"]:
             images = batch["image"].to(device, non_blocking=True); primary = batch["primary"].to(device, non_blocking=True); auxiliary = batch["auxiliary"].to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
@@ -89,6 +92,9 @@ def main():
                 continue
             scaler.scale(loss).backward(); scaler.step(optimizer); scaler.update()
             n = len(images); samples += n; loss_sum += loss.item()*n; primary_sum += primary_loss.item()*n; auxiliary_sum += auxiliary_loss.item()*n
+            step += 1
+            if step == 1 or step % 200 == 0:
+                print(json.dumps({"epoch": epoch + 1, "step": step, "steps": total_steps, "loss": loss_sum / samples}), flush=True)
         metrics = validate(model, loaders["val"], device); metrics.update(epoch=epoch+1, loss=loss_sum/samples, primary_loss=primary_sum/samples, auxiliary_loss=auxiliary_sum/samples)
         print(json.dumps(metrics))
         checkpoint = {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": epoch, "best_score": best, "config": config, "classes": CLASSES, "class_weights": weights.cpu()}
