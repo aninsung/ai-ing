@@ -14,6 +14,31 @@ DISEASES = [
 CLASSES = ["No Finding", *DISEASES]
 
 
+def primary_sample_weights(rows, power=1.0):
+    """Inverse-frequency draw weights. Rare primary classes are sampled more often.
+
+    Rows without a single primary label keep the median labeled-class weight so
+    the auxiliary head still sees them.
+    """
+    if power < 0:
+        raise ValueError("power must be non-negative")
+    labels = []
+    counts = {}
+    for row in rows:
+        raw = row["primary_class_id"]
+        label = int(raw) if raw else -1
+        labels.append(label)
+        if label >= 0:
+            counts[label] = counts.get(label, 0) + 1
+    labeled_counts = list(counts.values())
+    fallback = float(np.median(labeled_counts)) if labeled_counts else 1.0
+    weights = []
+    for label in labels:
+        count = counts[label] if label >= 0 else fallback
+        weights.append((1.0 / count) ** power)
+    return weights
+
+
 def read_manifest(path, split):
     with Path(path).open(encoding="utf-8-sig", newline="") as file:
         rows = [row for row in csv.DictReader(file) if row["split"] == split]
