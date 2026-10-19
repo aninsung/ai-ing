@@ -7,9 +7,10 @@ import numpy as np
 import torch
 import yaml
 from torch.utils.data import DataLoader
-from src.multiclass_dataset import read_manifest, NIHMultiTaskDataset, CLASSES
+from src.multiclass_dataset import read_manifest, NIHMultiTaskDataset, CLASSES, DISEASES
 from src.multiclass_model import MultiTaskResNet50
-from src.multiclass_losses import multitask_loss
+from src.multiclass_losses import auxiliary_positive_weight, multitask_loss
+from src.multiclass_metrics import macro_binary_auroc
 
 
 def seed_all(seed):
@@ -18,23 +19,44 @@ def seed_all(seed):
 
 
 @torch.no_grad()
-def validate(model, loader, device):
-    model.eval(); correct = total = 0; predictions = []; targets = []
+def validate(model, loader, device, log_prior=None, tau=0.0, select_tau=False):
+    model.eval(); disease_probs = []; disease_targets = []; primary_logits = []; primary_labels = []
     for batch in loader:
-        primary = batch["primary"].to(device); logits, _ = model(batch["image"].to(device))
+        primary = batch["primary"].to(device)
+        logits, auxiliary_logits = model(batch["image"].to(device))
+        disease_probs.append(auxiliary_logits.sigmoid().cpu().numpy())
+        disease_targets.append(batch["auxiliary"].numpy())
         mask = primary >= 0
         if mask.any():
-            pred = logits[mask].argmax(1); correct += (pred == primary[mask]).sum().item(); total += mask.sum().item()
-            predictions.extend(pred.cpu().tolist()); targets.extend(primary[mask].cpu().tolist())
-    balanced = None
-    if targets:
-        recalls = []
-        for cls in range(len(CLASSES)):
-            actual = [i for i, value in enumerate(targets) if value == cls]
-            if actual:
-                recalls.append(sum(predictions[i] == cls for i in actual) / len(actual))
-        balanced = float(np.mean(recalls)) if recalls else None
-    return {"accuracy": correct / total if total else None, "balanced_accuracy": balanced, "primary_images": total}
+            primary_logits.append(logits[mask].cpu())
+            primary_labels.append(primary[mask].cpu())
+    logits = torch.cat(primary_logits)
+    labels = torch.cat(primary_labels)
+    taus = (0.0, 0.5, 1.0) if select_tau else (tau,)
+    chosen_tau, predictions = tau, None
+    best_correct = -1
+    for candidate in taus:
+        adjusted = logits if log_prior is None else logits + candidate * log_prior.cpu()
+        pred = adjusted.argmax(1)
+        correct = int((pred == labels).sum())
+        if correct > best_correct:
+            best_correct, chosen_tau, predictions = correct, candidate, pred
+    predictions = predictions.tolist()
+    targets = labels.tolist()
+    recalls = []
+    for cls in range(len(CLASSES)):
+        actual = [i for i, value in enumerate(targets) if value == cls]
+        if actual:
+            recalls.append(sum(predictions[i] == cls for i in actual) / len(actual))
+    macro, per_label = macro_binary_auroc(np.concatenate(disease_targets), np.concatenate(disease_probs))
+    return {
+        "accuracy": best_correct / len(targets),
+        "balanced_accuracy": float(np.mean(recalls)) if recalls else None,
+        "primary_images": len(targets),
+        "prior_tau": chosen_tau,
+        "macro_auroc": macro,
+        "label_auroc": {name: score for name, score in zip(DISEASES, per_label)},
+    }
 
 
 def main():
@@ -47,8 +69,9 @@ def main():
     seed_all(config["train"]["seed"])
     rows = {split: read_manifest(config["data"]["manifest"], split) for split in ("train", "val", "test")}
     root = config["data"]["image_root"]
-    datasets = {"train": NIHMultiTaskDataset(rows["train"], root, augment=True),
-                "val": NIHMultiTaskDataset(rows["val"], root)}
+    image_size = int(config["data"].get("image_size", 224))
+    datasets = {split: NIHMultiTaskDataset(rows[split], root, augment=split == "train", image_size=image_size)
+                for split in ("train", "val", "test")}
     loaders = {split: DataLoader(dataset, batch_size=config["train"]["batch_size"],
                                  shuffle=split == "train", num_workers=0,
                                  pin_memory=torch.cuda.is_available())
@@ -61,7 +84,17 @@ def main():
     if (counts == 0).any(): raise ValueError(f"No train primary examples for classes: {[CLASSES[i] for i,v in enumerate(counts) if v == 0]}")
     weights = (1.0 / counts.clamp_min(1).log1p()); weights = weights / weights.mean()
     lo, hi = config["train"]["class_weight_clip"]; weights = weights.clamp(lo, hi)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config["train"]["learning_rate"])
+    log_prior = (counts / counts.sum()).clamp_min(1e-8).log()
+    if config["train"].get("prior_bias", False):
+        with torch.no_grad():
+            model.primary_head.bias.copy_(log_prior)
+    pos_weight = auxiliary_positive_weight(rows["train"], DISEASES).to(device)
+    auxiliary_loss_name = config["train"].get("auxiliary_loss", "asymmetric_bce")
+    head_lr = float(config["train"].get("head_learning_rate", config["train"]["learning_rate"]))
+    optimizer = torch.optim.AdamW([
+        {"params": model.encoder.parameters(), "lr": config["train"]["learning_rate"]},
+        {"params": list(model.primary_head.parameters()) + list(model.auxiliary_head.parameters()), "lr": head_lr},
+    ])
     use_amp = bool(config["train"].get("amp", True)) and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     save_dir = Path(config["train"]["save_dir"]); save_dir.mkdir(parents=True, exist_ok=True)
@@ -78,24 +111,53 @@ def main():
         raise ValueError("--epochs must be positive")
     for epoch in range(start_epoch, epochs):
         model.train(); loss_sum = primary_sum = auxiliary_sum = samples = 0
+        primary_correct = primary_seen = 0
+        step = 0
+        total_steps = len(loaders["train"])
         for batch in loaders["train"]:
             images = batch["image"].to(device, non_blocking=True); primary = batch["primary"].to(device, non_blocking=True); auxiliary = batch["auxiliary"].to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
                 p_logits, a_logits = model(images)
-                loss, primary_loss, auxiliary_loss = multitask_loss(p_logits, a_logits, primary, auxiliary, weights, config["model"]["auxiliary_loss_weight"])
+                loss, primary_loss, auxiliary_loss = multitask_loss(
+                    p_logits, a_logits, primary, auxiliary, weights, config["model"]["auxiliary_loss_weight"],
+                    auxiliary_loss_name, pos_weight)
             if not torch.isfinite(loss):
                 optimizer.zero_grad(set_to_none=True)
                 continue
             scaler.scale(loss).backward(); scaler.step(optimizer); scaler.update()
             n = len(images); samples += n; loss_sum += loss.item()*n; primary_sum += primary_loss.item()*n; auxiliary_sum += auxiliary_loss.item()*n
-        metrics = validate(model, loaders["val"], device); metrics.update(epoch=epoch+1, loss=loss_sum/samples, primary_loss=primary_sum/samples, auxiliary_loss=auxiliary_sum/samples)
+            with torch.no_grad():
+                labeled = primary >= 0
+                if labeled.any():
+                    primary_seen += int(labeled.sum())
+                    primary_correct += int((p_logits.detach()[labeled].argmax(1) == primary[labeled]).sum())
+            step += 1
+            if step == 1 or step % 200 == 0:
+                print(json.dumps({"epoch": epoch + 1, "step": step, "steps": total_steps, "loss": loss_sum / samples,
+                                  "train_accuracy": primary_correct / primary_seen if primary_seen else None}), flush=True)
+        metrics = validate(model, loaders["val"], device, log_prior, select_tau=bool(config["train"].get("prior_bias", False)))
+        metrics.update(epoch=epoch+1, loss=loss_sum/samples, primary_loss=primary_sum/samples, auxiliary_loss=auxiliary_sum/samples, train_accuracy=primary_correct / primary_seen if primary_seen else None)
         print(json.dumps(metrics))
-        checkpoint = {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": epoch, "best_score": best, "config": config, "classes": CLASSES, "class_weights": weights.cpu()}
+        selection = config.get("evaluation", {}).get("primary_metric", "macro_auroc")
+        if selection not in {"accuracy", "balanced_accuracy", "macro_auroc"}:
+            raise ValueError(f"Unsupported selection metric: {selection}")
+        score = metrics[selection] if metrics[selection] is not None else -1.0
+        improved = score > best
+        best = max(best, score)
+        checkpoint = {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": epoch, "best_score": best, "prior_tau": metrics.get("prior_tau", 0.0), "config": config, "classes": CLASSES, "class_weights": weights.cpu(), "selection_metric": selection}
         torch.save(checkpoint, save_dir / "latest_model.pth")
-        score = metrics["balanced_accuracy"] if metrics["balanced_accuracy"] is not None else -1
-        if score > best: best = score; torch.save(checkpoint, save_dir / "best_model.pth")
+        if improved:
+            torch.save(checkpoint, save_dir / "best_model.pth")
         (save_dir / "history.jsonl").open("a", encoding="utf-8").write(json.dumps(metrics) + "\n")
+    best_path = save_dir / "best_model.pth"
+    if best_path.exists():
+        chosen = torch.load(best_path, map_location=device)
+        model.load_state_dict(chosen["model"])
+        test_metrics = validate(model, loaders["test"], device, log_prior, tau=float(chosen.get("prior_tau", 0.0)))
+        test_metrics["split"] = "test"
+        print(json.dumps({"test_accuracy": test_metrics["accuracy"], "test_balanced_accuracy": test_metrics["balanced_accuracy"], "test_macro_auroc": test_metrics["macro_auroc"]}))
+        (save_dir / "test_metrics.json").write_text(json.dumps(test_metrics, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__": main()

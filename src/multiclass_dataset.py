@@ -26,10 +26,11 @@ def read_manifest(path, split):
 
 
 class NIHMultiTaskDataset(Dataset):
-    def __init__(self, rows, image_root, augment=False):
+    def __init__(self, rows, image_root, augment=False, image_size=224):
         self.rows = rows
         self.image_root = Path(image_root)
         self.augment = augment
+        self.image_size = int(image_size)
 
     def __len__(self):
         return len(self.rows)
@@ -40,7 +41,10 @@ class NIHMultiTaskDataset(Dataset):
         relative_path = Path(row["image_path"].replace("\\", "/"))
         path = self.image_root / relative_path
         with Image.open(path) as source:
-            image = np.asarray(source.convert("L"), dtype=np.float32).copy()
+            image = np.asarray(
+                source.convert("L").resize((self.image_size, self.image_size), Image.Resampling.BILINEAR),
+                dtype=np.float32,
+            ).copy()
         if self.augment:
             if torch.rand(()) < 0.5:
                 image = image[:, ::-1].copy()
