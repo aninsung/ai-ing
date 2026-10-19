@@ -6,11 +6,11 @@ from pathlib import Path
 import numpy as np
 import torch
 import yaml
-from torch.utils.data import DataLoader
-from src.multiclass_dataset import read_manifest, NIHMultiTaskDataset, CLASSES, DISEASES
-from src.multiclass_model import MultiTaskResNet50
-from src.multiclass_losses import auxiliary_positive_weight, multitask_loss
-from src.multiclass_metrics import macro_binary_auroc
+from torch.utils.data import DataLoader, WeightedRandomSampler
+from src.multiclass_dataset import read_manifest, NIHMultiTaskDataset, CLASSES, DISEASES, primary_sample_weights
+from src.multiclass_model import build_multitask_model
+from src.multiclass_losses import auxiliary_positive_weight, effective_number_weights, multitask_loss
+from src.multiclass_metrics import macro_binary_auroc, primary_decision_metrics
 
 
 def seed_all(seed):
@@ -41,22 +41,15 @@ def validate(model, loader, device, log_prior=None, tau=0.0, select_tau=False):
         correct = int((pred == labels).sum())
         if correct > best_correct:
             best_correct, chosen_tau, predictions = correct, candidate, pred
-    predictions = predictions.tolist()
-    targets = labels.tolist()
-    recalls = []
-    for cls in range(len(CLASSES)):
-        actual = [i for i, value in enumerate(targets) if value == cls]
-        if actual:
-            recalls.append(sum(predictions[i] == cls for i in actual) / len(actual))
+    summary = primary_decision_metrics(labels.tolist(), predictions.tolist(), CLASSES)
     macro, per_label = macro_binary_auroc(np.concatenate(disease_targets), np.concatenate(disease_probs))
-    return {
-        "accuracy": best_correct / len(targets),
-        "balanced_accuracy": float(np.mean(recalls)) if recalls else None,
-        "primary_images": len(targets),
+    summary.update({
+        "primary_images": len(labels),
         "prior_tau": chosen_tau,
         "macro_auroc": macro,
         "label_auroc": {name: score for name, score in zip(DISEASES, per_label)},
-    }
+    })
+    return summary
 
 
 def main():
@@ -72,18 +65,38 @@ def main():
     image_size = int(config["data"].get("image_size", 224))
     datasets = {split: NIHMultiTaskDataset(rows[split], root, augment=split == "train", image_size=image_size)
                 for split in ("train", "val", "test")}
-    loaders = {split: DataLoader(dataset, batch_size=config["train"]["batch_size"],
-                                 shuffle=split == "train", num_workers=0,
-                                 pin_memory=torch.cuda.is_available())
-               for split, dataset in datasets.items()}
+    sampler = None
+    if config["train"].get("oversample", False):
+        draw_weights = primary_sample_weights(rows["train"], power=float(config["train"].get("oversample_power", 1.0)))
+        generator = torch.Generator()
+        generator.manual_seed(int(config["train"]["seed"]))
+        sampler = WeightedRandomSampler(draw_weights, num_samples=len(datasets["train"]), replacement=True, generator=generator)
+    loaders = {}
+    for split, dataset in datasets.items():
+        loaders[split] = DataLoader(
+            dataset, batch_size=config["train"]["batch_size"],
+            shuffle=split == "train" and sampler is None,
+            sampler=sampler if split == "train" else None,
+            num_workers=0, pin_memory=torch.cuda.is_available())
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = MultiTaskResNet50(config["data"]["num_classes"], config["data"]["multilabel_classes"], config["model"]["pretrained"]).to(device)
+    backbone = config["model"].get("backbone", "resnet50")
+    model = build_multitask_model(
+        backbone, config["data"]["num_classes"], config["data"]["multilabel_classes"], config["model"]["pretrained"],
+    ).to(device)
     counts = torch.zeros(config["data"]["num_classes"], device=device)
     for row in rows["train"]:
         if row["primary_class_id"]: counts[int(row["primary_class_id"])] += 1
     if (counts == 0).any(): raise ValueError(f"No train primary examples for classes: {[CLASSES[i] for i,v in enumerate(counts) if v == 0]}")
-    weights = (1.0 / counts.clamp_min(1).log1p()); weights = weights / weights.mean()
+    primary_loss_name = config["train"].get("primary_loss", "cross_entropy")
+    if primary_loss_name == "cb_focal":
+        weights = effective_number_weights(counts, beta=float(config["train"].get("cb_beta", 0.9999)))
+    elif primary_loss_name == "cross_entropy":
+        weights = (1.0 / counts.clamp_min(1).log1p()); weights = weights / weights.mean()
+    else:
+        raise ValueError(f"Unsupported primary loss: {primary_loss_name}")
+    weights = weights.to(device)
     lo, hi = config["train"]["class_weight_clip"]; weights = weights.clamp(lo, hi)
+    focal_gamma = float(config["train"].get("focal_gamma", 2.0))
     log_prior = (counts / counts.sum()).clamp_min(1e-8).log()
     if config["train"].get("prior_bias", False):
         with torch.no_grad():
@@ -121,7 +134,7 @@ def main():
                 p_logits, a_logits = model(images)
                 loss, primary_loss, auxiliary_loss = multitask_loss(
                     p_logits, a_logits, primary, auxiliary, weights, config["model"]["auxiliary_loss_weight"],
-                    auxiliary_loss_name, pos_weight)
+                    auxiliary_loss_name, pos_weight, primary_loss_name, focal_gamma)
             if not torch.isfinite(loss):
                 optimizer.zero_grad(set_to_none=True)
                 continue
@@ -140,7 +153,7 @@ def main():
         metrics.update(epoch=epoch+1, loss=loss_sum/samples, primary_loss=primary_sum/samples, auxiliary_loss=auxiliary_sum/samples, train_accuracy=primary_correct / primary_seen if primary_seen else None)
         print(json.dumps(metrics))
         selection = config.get("evaluation", {}).get("primary_metric", "macro_auroc")
-        if selection not in {"accuracy", "balanced_accuracy", "macro_auroc"}:
+        if selection not in {"accuracy", "macro_f1", "balanced_accuracy", "rare_recall", "macro_auroc"}:
             raise ValueError(f"Unsupported selection metric: {selection}")
         score = metrics[selection] if metrics[selection] is not None else -1.0
         improved = score > best
@@ -156,7 +169,14 @@ def main():
         model.load_state_dict(chosen["model"])
         test_metrics = validate(model, loaders["test"], device, log_prior, tau=float(chosen.get("prior_tau", 0.0)))
         test_metrics["split"] = "test"
-        print(json.dumps({"test_accuracy": test_metrics["accuracy"], "test_balanced_accuracy": test_metrics["balanced_accuracy"], "test_macro_auroc": test_metrics["macro_auroc"]}))
+        print(json.dumps({
+            "test_accuracy": test_metrics["accuracy"],
+            "test_macro_f1": test_metrics["macro_f1"],
+            "test_balanced_accuracy": test_metrics["balanced_accuracy"],
+            "test_rare_recall": test_metrics["rare_recall"],
+            "test_class_recall": test_metrics["class_recall"],
+            "test_macro_auroc": test_metrics["macro_auroc"],
+        }))
         (save_dir / "test_metrics.json").write_text(json.dumps(test_metrics, indent=2), encoding="utf-8")
 
 

@@ -1,0 +1,35 @@
+experiment_name: "NIH_MultiClass_DenseNet121_CBFocal"
+
+data:
+  manifest: "data/nih_multiclass_manifest.csv"
+  image_root: "data/archive"
+  image_size: 224
+  num_classes: 15
+  multilabel_classes: 14
+
+model:
+  backbone: "densenet121"
+  pretrained: true
+  auxiliary_loss_weight: 0.5
+
+train:
+  seed: 42
+  batch_size: 32
+  learning_rate: 0.0001
+  head_learning_rate: 0.001
+  epochs: 10
+  amp: true
+  class_weight_clip: [0.1, 50.0]
+  prior_bias: false
+  primary_loss: "cb_focal"
+  focal_gamma: 2.0
+  cb_beta: 0.9999
+  oversample: true
+  oversample_power: 1.0
+  auxiliary_loss: "bce_pos_weight"
+  save_dir: "outputs/multiclass_densenet121_ckpt"
+
+evaluation:
+  split: "test"
+  primary_metric: "macro_f1"
+  multilabel_threshold_source: "validation"
