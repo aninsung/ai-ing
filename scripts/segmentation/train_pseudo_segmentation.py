@@ -1,10 +1,15 @@
 """Weak segmentation smoke training using NIH BBox-derived pseudo-masks."""
-import argparse, csv, hashlib
+import sys
 from pathlib import Path
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import argparse, csv, hashlib
 import torch
 from torch.utils.data import DataLoader
-from src.seg_dataset import SegDataset
-from src.seg_network import build_model
+from src.segmentation.dataset import SegDataset
+from src.segmentation.network import build_model
 
 def split_rows(rows):
     out = {'train': [], 'val': [], 'test': []}

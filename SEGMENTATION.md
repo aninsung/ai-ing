@@ -6,13 +6,13 @@
 
 ## 설치
 
-프로젝트 Python 환경에서 `pip install -r requirements-segmentation.txt`를 실행하세요.
+저장소 루트에서 명령을 실행하세요. `pip install -r requirements.txt`로 의존성을 설치합니다.
 Python 3.10 이상을 권장합니다. GPU용 PyTorch 설치는 사용 환경에 맞게 선택하세요.
 
 ## 데이터 준비
 
 ```
-python prepare_seg_data.py --csv data/Data_Entry_2017.csv --images data/raw --output data/seg_manifest.csv
+python scripts/segmentation/prepare_seg_data.py --csv data/Data_Entry_2017.csv --images data/raw --output data/seg_manifest.csv
 ```
 
 누락 파일은 `data/seg_manifest.audit.json`에 모두 기록합니다. 같은 환자는 같은 split에 들어갑니다.
@@ -36,10 +36,12 @@ validation/test에는 검토된 실제 마스크만 사용합니다.
 ## 검증과 학습
 
 ```
-python train_seg.py --validate-only
-python train_seg.py
-python train_seg.py --resume checkpoints/segmentation/latest_model.pth
+python scripts/segmentation/train_seg.py --validate-only
+python scripts/segmentation/train_seg.py
+python scripts/segmentation/train_seg.py --resume checkpoints/segmentation/latest_model.pth
 ```
+
+`scripts/segmentation/train_unetpp.py`는 같은 매니페스트를 쓰는 짧은 UNet++ 학습 스크립트입니다. 재현 실험의 기준 진입점은 `train_seg.py`입니다.
 
 config: `configs/segmentation.yaml`. 512x512 종횡비 유지 resize/padding, 공동 좌우반전,
 MONAI 2D U-Net, Dice+BCE loss를 사용합니다. 작은 결절이 resize 후 사라지면 학습을 중단합니다.
@@ -55,7 +57,7 @@ checkpoint는 모델/optimizer/epoch/config/threshold/manifest hash/RNG를 저�
 ## 평가
 
 ```
-python evaluate_seg.py --checkpoint checkpoints/segmentation/best_model.pth --output outputs/seg_test
+python scripts/segmentation/evaluate_seg.py --checkpoint checkpoints/segmentation/best_model.pth --output outputs/seg_test
 ```
 
 test 또는 `--split val`에 등록된 approved 실제 마스크/음성만 평가합니다.

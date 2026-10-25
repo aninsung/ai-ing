@@ -1,0 +1,67 @@
+# RareZoom-RL v1.0 starting configuration.
+# These values are a recommended start. They are not tuned hyperparameters.
+# Retune reward.compute_penalty after the weighted BCE scale is known.
+
+experiment_name: "RareZoom-RL_v1"
+
+dataset:
+  name: NIH_ChestXray14
+  num_classes: 14
+  # Diseases used for focused reporting. The head still predicts all 14 labels.
+  focus_classes: ["Nodule", "Mass", "Pneumothorax"]
+  global_size: 224
+  raw_size: 1024
+  patient_level_split: true
+  # Official NIH test list stays untouched until final evaluation.
+  hold_out_official_test: true
+  # Bounding boxes evaluate ROI hit rate. They are not policy supervision
+  # unless a patient-disjoint location-annotation train split is created.
+  use_bbox_for_training: false
+
+model:
+  backbone: resnet50
+  pretrained: true
+  in_channels: 3
+  feature_dim: 2048
+  gru_hidden: 512
+  fusion: gru
+  classifier: multilabel_sigmoid
+
+roi:
+  crop_size: 512
+  stride: 256
+  grid: [3, 3]
+  max_zooms: 3
+  # Crops are taken from the raw image, then resized to global_size.
+
+agent:
+  algorithm: DDQN
+  num_actions: 10  # 9 ROI + STOP
+  replay_capacity: 20000
+  batch_size: 64
+  gamma: 1.0
+  epsilon_start: 1.0
+  epsilon_end: 0.05
+  epsilon_decay: 0.995
+  target_update_freq: 250
+  action_masking: true
+  learning_rate: 0.0001
+  grad_clip: 5.0
+
+reward:
+  use_weighted_bce: true
+  # Cap on class weights computed from train positive/negative counts.
+  class_weight_clip: [0.25, 4.0]
+  # Per-zoom cost before lambda. STOP has cost 0 and reward 0.
+  zoom_cost: 1.0
+  compute_penalty: 0.02
+  # Labels enter the reward only inside the training environment.
+
+train:
+  seed: 42
+  stage1_epochs: 30
+  stage2_epochs: 20
+  stage3_episodes: 20000
+  # Stage 3 freezes every classification network.
+  freeze_classifier_in_stage3: true
+  save_dir: "checkpoints/rarezoom"

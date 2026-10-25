@@ -1,11 +1,16 @@
 """Train global+ROI feature fusion on the full NIH multiclass manifest."""
-import argparse,csv
+import sys
 from pathlib import Path
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import argparse,csv
 import numpy as np, torch
 from PIL import Image
 from torch.utils.data import Dataset,DataLoader
-from src.multiclass_dataset import read_manifest,DISEASES
-from src.fusion_model import FusionResNet50
+from src.classification.dataset import read_manifest,DISEASES
+from src.classification.fusion import FusionResNet50
 
 class FusionDataset(Dataset):
  def __init__(self,rows,root,masks,size=224): self.rows=rows; self.root=Path(root); self.masks=masks; self.size=size

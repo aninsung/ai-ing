@@ -1,7 +1,7 @@
 import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
-from .seg_transforms import letterbox
+from .transforms import letterbox
 
 
 class SegDataset(Dataset):
