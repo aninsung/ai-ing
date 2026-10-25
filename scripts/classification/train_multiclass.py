@@ -1,15 +1,20 @@
 """Train the NIH 15-class primary head with a 14-label auxiliary head."""
+import sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import argparse
 import json
 import random
-from pathlib import Path
 import numpy as np
 import torch
 import yaml
 from torch.utils.data import DataLoader
-from src.multiclass_dataset import read_manifest, NIHMultiTaskDataset, CLASSES
-from src.multiclass_model import MultiTaskResNet50
-from src.multiclass_losses import multitask_loss
+from src.classification.dataset import read_manifest, NIHMultiTaskDataset, CLASSES
+from src.classification.model import MultiTaskResNet50
+from src.classification.losses import multitask_loss
 
 
 def seed_all(seed):

@@ -1,12 +1,18 @@
+import sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import os
 import torch
-from src.utils import get_config, _set_seed
-from src.dataset import load_and_filter_data, get_dataloader
+from src.bicdrl.utils import get_config, _set_seed
+from src.bicdrl.dataset import load_and_filter_data, get_dataloader
 
 def test_data_pipeline():
     print("🛠️ [Phase 1] Data Pipeline Validator 🛠️\n")
     _set_seed(42)
-    config = get_config("configs/config.yaml")
+    config = get_config(str(ROOT / "configs/bicdrl.yaml"))
     
     csv_path = config['data']['train_csv_path']
     image_dir = config['data']['image_dir']

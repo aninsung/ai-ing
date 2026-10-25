@@ -1,11 +1,16 @@
 """Evaluate global+ROI fusion checkpoint on NIH validation/test splits."""
-import argparse,csv,json
+import sys
 from pathlib import Path
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import argparse,csv,json
 import numpy as np, torch
 from PIL import Image
 from sklearn.metrics import f1_score, balanced_accuracy_score, roc_auc_score
-from src.fusion_model import FusionResNet50
-from src.multiclass_dataset import CLASSES,DISEASES
+from src.classification.fusion import FusionResNet50
+from src.classification.dataset import CLASSES,DISEASES
 
 def main():
  p=argparse.ArgumentParser(); p.add_argument('--manifest',required=True); p.add_argument('--root',required=True); p.add_argument('--bbox-manifest',required=True); p.add_argument('--checkpoint',required=True); p.add_argument('--output',required=True); a=p.parse_args()

@@ -1,11 +1,16 @@
 """Fine-tune the multiclass classifier on BBox-derived ROI images."""
-import argparse,csv
+import sys
 from pathlib import Path
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import argparse,csv
 import numpy as np, torch
 from PIL import Image
 from torch.utils.data import Dataset,DataLoader
-from src.multiclass_model import MultiTaskResNet50
-from src.multiclass_dataset import CLASSES
+from src.classification.model import MultiTaskResNet50
+from src.classification.dataset import CLASSES
 
 class RoiDataset(Dataset):
  def __init__(self,rows,size=224): self.rows=rows; self.size=size

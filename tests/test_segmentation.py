@@ -5,9 +5,9 @@ import tempfile
 import unittest
 import numpy as np
 from PIL import Image
-from prepare_seg_data import prepare, patient_split
-from src.seg_manifest import load_manifest, supervised_rows
-from src.seg_metrics import binary_scores, summarize
+from scripts.segmentation.prepare_seg_data import prepare, patient_split
+from src.segmentation.manifest import load_manifest, supervised_rows
+from src.segmentation.metrics import binary_scores, summarize
 
 
 class SegmentationTests(unittest.TestCase):
@@ -75,7 +75,7 @@ class SegmentationTests(unittest.TestCase):
 
     @unittest.skipUnless(importlib.util.find_spec('torch'), 'PyTorch is not installed')
     def test_mask_alignment_and_restore(self):
-        from src.seg_transforms import letterbox, restore_probability
+        from src.segmentation.transforms import letterbox, restore_probability
         mask = np.zeros((16,32), dtype=np.uint8)
         mask[4:12,8:24] = 255
         image, target, geometry = letterbox(Image.fromarray(mask), Image.fromarray(mask), 64)
@@ -85,7 +85,7 @@ class SegmentationTests(unittest.TestCase):
 
     @unittest.skipUnless(importlib.util.find_spec('torch'), 'PyTorch is not installed')
     def test_invalid_and_empty_masks_rejected(self):
-        from src.seg_dataset import SegDataset
+        from src.segmentation.dataset import SegDataset
         row = self.row(annotation_type='mask', review_status='approved', mask_path='mask.png')
         Image.new('L', (32,16), 2).save(self.root/'mask.png')
         dataset = SegDataset(load_manifest(self.manifest([row])), 64)
@@ -100,7 +100,7 @@ class SegmentationTests(unittest.TestCase):
     def test_forward_backward_smoke(self):
         import torch
         from monai.losses import DiceCELoss
-        from src.seg_network import build_model
+        from src.segmentation.network import build_model
         torch.set_num_threads(1)
         model = build_model()
         images = torch.rand(2,1,64,64)

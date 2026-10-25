@@ -3,8 +3,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 import torch
-from .seg_transforms import restore_probability
-from .seg_metrics import binary_scores, summarize
+from .transforms import restore_probability
+from .metrics import binary_scores, summarize
 
 
 def seed_everything(seed):

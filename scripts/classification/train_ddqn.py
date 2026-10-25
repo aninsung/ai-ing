@@ -1,16 +1,21 @@
 """Train a DDQN policy that selects useful X-ray regions before classification."""
+import sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import argparse
 import json
 import random
-from pathlib import Path
 import numpy as np
 from PIL import Image
 import torch
 import yaml
 from torch.utils.data import DataLoader
-from src.multiclass_dataset import read_manifest, NIHMultiTaskDataset
-from src.multiclass_model import MultiTaskResNet50
-from src.ddqn_region import RegionQNetwork, TransitionBuffer, crop_grid, make_state, select_action
+from src.classification.dataset import read_manifest, NIHMultiTaskDataset
+from src.classification.model import MultiTaskResNet50
+from src.classification.region_ddqn import RegionQNetwork, TransitionBuffer, crop_grid, make_state, select_action
 
 
 def seed_all(seed):

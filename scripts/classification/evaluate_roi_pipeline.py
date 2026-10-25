@@ -1,10 +1,15 @@
 """Evaluate full-image versus BBox pseudo-mask ROI classification."""
-import argparse,csv,json
+import sys
 from pathlib import Path
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import argparse,csv,json
 import torch
 from PIL import Image
-from src.multiclass_model import MultiTaskResNet50
-from src.multiclass_dataset import DISEASES, CLASSES
+from src.classification.model import MultiTaskResNet50
+from src.classification.dataset import DISEASES, CLASSES
 
 def main():
  p=argparse.ArgumentParser(); p.add_argument('--manifest',required=True); p.add_argument('--checkpoint',required=True); p.add_argument('--output',required=True); a=p.parse_args()

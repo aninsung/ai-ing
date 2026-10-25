@@ -1,19 +1,22 @@
 """Train supervised 2D nodule segmentation from reviewed masks."""
+import sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import argparse
 import csv
 import hashlib
 import json
-from pathlib import Path
 import torch
 import yaml
 from monai.losses import DiceCELoss
 from torch.utils.data import DataLoader
-from src.seg_manifest import load_manifest, supervised_rows
-from src.seg_dataset import SegDataset
-from src.seg_network import build_model
-from src.seg_engine import seed_everything, evaluate_model
-
-ROOT = Path(__file__).resolve().parent
+from src.segmentation.manifest import load_manifest, supervised_rows
+from src.segmentation.dataset import SegDataset
+from src.segmentation.network import build_model
+from src.segmentation.engine import seed_everything, evaluate_model
 
 
 def main():

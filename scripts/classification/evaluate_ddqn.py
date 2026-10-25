@@ -1,13 +1,18 @@
 """Compare global-only classification with greedy DDQN region observation."""
+import sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import argparse
 import json
-from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from src.multiclass_dataset import read_manifest, NIHMultiTaskDataset
-from src.multiclass_model import MultiTaskResNet50
-from src.ddqn_region import RegionQNetwork, crop_grid, make_state
+from src.classification.dataset import read_manifest, NIHMultiTaskDataset
+from src.classification.model import MultiTaskResNet50
+from src.classification.region_ddqn import RegionQNetwork, crop_grid, make_state
 
 
 @torch.no_grad()
